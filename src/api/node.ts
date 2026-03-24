@@ -1,6 +1,8 @@
 export interface ExchangeResult {
   openim_token: string
   openim_api_addr: string
+  openim_ws_addr: string
+  user_id: string
   group_id: string
 }
 

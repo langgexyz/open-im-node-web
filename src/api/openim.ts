@@ -1,3 +1,6 @@
+import { getSDK, CbEvents, MessageType } from '@openim/wasm-client-sdk'
+import type { MessageItem } from '@openim/wasm-client-sdk'
+
 export interface ArticleContent {
   title: string
   cover_url: string
@@ -6,38 +9,77 @@ export interface ArticleContent {
 }
 
 export interface OIMMessage {
-  seq: number
   msg_id: string
+  seq: number
   send_time: number
-  content_type: string
   content: ArticleContent
 }
 
-async function postOIM(apiAddr: string, token: string, path: string, body: unknown) {
-  const res = await fetch(`${apiAddr}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) throw new Error(`OpenIM ${path} failed: ${res.status}`)
-  return res.json()
+export interface InitSDKParams {
+  userID: string
+  token: string
+  apiAddr: string
+  wsAddr: string
 }
 
-export async function getMaxSeq(apiAddr: string, token: string, conversationId: string): Promise<number> {
-  const res = await postOIM(apiAddr, token, '/msg/get_conversations_has_read_and_max_seq', {
-    conversation_ids: [conversationId],
-  })
-  return res.data.conversation_max_seqs[conversationId] ?? 0
+let _sdk: ReturnType<typeof getSDK> | null = null
+
+function sdk() {
+  if (!_sdk) _sdk = getSDK()
+  return _sdk
 }
 
-export async function pullMessages(
-  apiAddr: string, token: string, conversationId: string,
-  begin: number, end: number
-): Promise<OIMMessage[]> {
-  const res = await postOIM(apiAddr, token, '/msg/pull_msg_by_seq', {
-    conversation_id: conversationId,
-    seq_ranges: [{ begin, end }],
+export async function initSDK(params: InitSDKParams): Promise<void> {
+  await sdk().login({
+    userID: params.userID,
+    token: params.token,
+    apiAddr: params.apiAddr,
+    wsAddr: params.wsAddr,
+    platformID: 5, // Platform.Web
   })
-  const msgs: OIMMessage[] = res.data?.msgs ?? []
-  return msgs.filter(m => m.content_type === 'article')
+}
+
+export async function logoutSDK(): Promise<void> {
+  await sdk().logout()
+}
+
+function toOIMMessage(msg: MessageItem): OIMMessage | null {
+  if (msg.contentType !== MessageType.CustomMessage) return null
+  try {
+    const content = JSON.parse(msg.customElem?.data ?? '') as ArticleContent
+    if (!content.title) return null
+    return { msg_id: msg.clientMsgID, seq: msg.seq, send_time: msg.sendTime, content }
+  } catch {
+    return null
+  }
+}
+
+export async function getArticles(
+  conversationID: string,
+  startClientMsgID: string,
+  count: number,
+): Promise<{ messages: OIMMessage[]; isEnd: boolean }> {
+  const res = await sdk().getAdvancedHistoryMessageList({
+    conversationID,
+    startClientMsgID,
+    count,
+    viewType: 0, // ViewType.History
+  })
+  const msgs = (res.data?.messageList ?? [])
+    .map(toOIMMessage)
+    .filter((m): m is OIMMessage => m !== null)
+  return { messages: msgs, isEnd: res.data?.isEnd ?? true }
+}
+
+export function onNewArticle(
+  groupID: string,
+  callback: (msg: OIMMessage) => void,
+): () => void {
+  const handler = (msg: MessageItem) => {
+    if (msg.groupID !== groupID) return
+    const article = toOIMMessage(msg)
+    if (article) callback(article)
+  }
+  sdk().on(CbEvents.OnRecvNewMessage, handler)
+  return () => sdk().off(CbEvents.OnRecvNewMessage, handler)
 }

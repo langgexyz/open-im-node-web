@@ -1,41 +1,86 @@
 import { test, expect, vi, beforeEach } from 'vitest'
-import { getMaxSeq, pullMessages, type OIMMessage } from './openim'
+import { getArticles, onNewArticle } from './openim'
+import { CbEvents, MessageType } from '@openim/wasm-client-sdk'
 
-const mockFetch = vi.fn()
-vi.stubGlobal('fetch', mockFetch)
-beforeEach(() => mockFetch.mockReset())
-
-function mockResponse(body: unknown) {
-  mockFetch.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(body) })
+const handlers: Record<string, ((data: unknown) => void)[]> = {}
+const mockSDK = {
+  login: vi.fn().mockResolvedValue({}),
+  logout: vi.fn().mockResolvedValue({}),
+  getAdvancedHistoryMessageList: vi.fn(),
+  on: vi.fn((event: string, handler: (data: unknown) => void) => {
+    handlers[event] = handlers[event] ?? []
+    handlers[event].push(handler)
+  }),
+  off: vi.fn((event: string, handler: (data: unknown) => void) => {
+    handlers[event] = (handlers[event] ?? []).filter(h => h !== handler)
+  }),
 }
 
-test('getMaxSeq 返回 conversation 的 max_seq', async () => {
-  mockResponse({ data: { conversation_max_seqs: { group_0: 42 } } })
-  const seq = await getMaxSeq('http://api.test', 'oim-tok', 'group_0')
-  expect(mockFetch).toHaveBeenCalledWith(
-    'http://api.test/msg/get_conversations_has_read_and_max_seq',
-    expect.objectContaining({ headers: expect.objectContaining({ Authorization: 'Bearer oim-tok' }) })
-  )
-  expect(seq).toBe(42)
+vi.mock('@openim/wasm-client-sdk', () => ({
+  getSDK: () => mockSDK,
+  CbEvents: { OnRecvNewMessage: 'OnRecvNewMessage' },
+  MessageType: { CustomMessage: 110 },
+}))
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  Object.keys(handlers).forEach(k => delete handlers[k])
 })
 
-test('pullMessages 返回消息列表', async () => {
-  const msgs: OIMMessage[] = [
-    { seq: 1, msg_id: 'm1', send_time: 1000, content_type: 'article',
-      content: { title: 'T1', cover_url: '', summary: '', content_url: 'http://url' } }
-  ]
-  mockResponse({ data: { msgs } })
-  const result = await pullMessages('http://api.test', 'oim-tok', 'group_0', 1, 1)
-  expect(result).toHaveLength(1)
-  expect(result[0].msg_id).toBe('m1')
+function makeMsg(overrides: object = {}) {
+  return {
+    clientMsgID: 'm1',
+    seq: 5,
+    sendTime: 1000,
+    contentType: MessageType.CustomMessage,
+    groupID: '0',
+    customElem: { data: JSON.stringify({ title: 'T1', cover_url: '', summary: '', content_url: '' }) },
+    ...overrides,
+  }
+}
+
+test('getArticles 返回文章列表', async () => {
+  mockSDK.getAdvancedHistoryMessageList.mockResolvedValue({
+    data: { messageList: [makeMsg()], isEnd: true },
+  })
+  const result = await getArticles('group_0', '', 20)
+  expect(result.messages).toHaveLength(1)
+  expect(result.messages[0].msg_id).toBe('m1')
+  expect(result.isEnd).toBe(true)
 })
 
-test('pullMessages 只返回 content_type=article 的消息', async () => {
-  mockResponse({ data: { msgs: [
-    { seq:1, msg_id:'m1', send_time:1000, content_type:'article', content:{ title:'T', cover_url:'', summary:'', content_url:'' } },
-    { seq:2, msg_id:'m2', send_time:2000, content_type:'text', content:{ text:'hello' } },
-  ]}})
-  const result = await pullMessages('http://api.test', 'oim-tok', 'group_0', 1, 2)
-  expect(result).toHaveLength(1)
-  expect(result[0].msg_id).toBe('m1')
+test('getArticles 过滤非 CustomMessage', async () => {
+  mockSDK.getAdvancedHistoryMessageList.mockResolvedValue({
+    data: {
+      messageList: [
+        makeMsg(),
+        makeMsg({ clientMsgID: 'm2', contentType: 101 }), // TextMessage
+      ],
+      isEnd: false,
+    },
+  })
+  const result = await getArticles('group_0', '', 20)
+  expect(result.messages).toHaveLength(1)
+  expect(result.messages[0].msg_id).toBe('m1')
+})
+
+test('onNewArticle 监听新消息并过滤 groupID', () => {
+  const callback = vi.fn()
+  onNewArticle('0', callback)
+
+  // 同 group，应触发
+  handlers[CbEvents.OnRecvNewMessage]?.forEach(h => h(makeMsg()))
+  expect(callback).toHaveBeenCalledTimes(1)
+
+  // 不同 group，不应触发
+  handlers[CbEvents.OnRecvNewMessage]?.forEach(h => h(makeMsg({ groupID: 'other' })))
+  expect(callback).toHaveBeenCalledTimes(1)
+})
+
+test('onNewArticle 返回取消订阅函数', () => {
+  const callback = vi.fn()
+  const unsubscribe = onNewArticle('0', callback)
+  unsubscribe()
+  handlers[CbEvents.OnRecvNewMessage]?.forEach(h => h(makeMsg()))
+  expect(callback).not.toHaveBeenCalled()
 })

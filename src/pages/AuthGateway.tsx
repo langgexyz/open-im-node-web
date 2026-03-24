@@ -19,8 +19,8 @@ export default function AuthGateway() {
       return
     }
     exchangeToken(appToken)
-      .then(({ openim_token, openim_api_addr, group_id }) => {
-        setSession(openim_token, openim_api_addr, group_id)
+      .then(({ openim_token, openim_api_addr, openim_ws_addr, user_id, group_id }) => {
+        setSession(openim_token, openim_api_addr, openim_ws_addr, user_id, group_id)
         // 清除 URL 中的 token 参数
         window.history.replaceState({}, '', '/')
         navigate('/articles', { replace: true })
